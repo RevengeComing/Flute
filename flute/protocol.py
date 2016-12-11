@@ -3,27 +3,34 @@ from logging import Logger, DEBUG
 import datetime
 
 from httptools import HttpRequestParser, parse_url
+from werkzeug.routing import NotFound, RequestRedirect, MethodNotAllowed
 
 from statics import HTTP_STATUS_CODES
 
 __all__ = ['FluteHttpProtocol']
 
-RESPONSE1_HEAD = b'''
-HTTP/1.0 200 OK
-Date: Sun, 10 Oct 2010 23:26:07 GMT
-Server: Apache/2.2.8 (Ubuntu) mod_ssl/2.2.8 OpenSSL/0.9.8g
-Accept-Ranges: bytes
-Content-Length: 41
-Connection: close
-Content-Type: text/html
 
-<html><body><h1>asdasd</h1></body></html>
-'''
+class Response(object):
+    __slots__ = ['headers', 'body', 'cookies']
+
+    def __init__(self, headers, body, **options):
+        self.headers = headers
+        self.body = body
+
+    def add_cookie(self, key, value):
+        self.cookies[key] = value
+
+    def get_text(self):
+        header = "\r\n".join("{0}: {1}".format(key, value) for key, value in self.headers) + "\r\n\r\n"
+        text = header + body
+        return text.encode()
 
 
 class FluteHttpProtocol(asyncio.Protocol):
 
     headers = dict()
+
+    resp_headers = {}
 
     def __init__(self, app):
         self.app = app
@@ -36,28 +43,48 @@ class FluteHttpProtocol(asyncio.Protocol):
         hrp.feed_data(data)
         self.http_version = hrp.get_http_version()
         self.method = hrp.get_method()
-
-        task = asyncio.async(self.call_handler()) # or asyncio.get_event_loop().create_task()
-        # task.add_done_callback(self.handle_go_result)
+        before_requests = asyncio.async(self.call_before_requests())
+    
+    async def call_before_requests(self):
+        await self.call_handler()
 
     async def call_handler(self):
-        route = self.app.routes.get_route(self.url_requested.path.decode('utf-8'))
-        if not route:
-            self.status_code = 404
-            self.create_response_header()
-            resp = await self.app.get_error_response(404, self)
-            self.transport.write(self.header + resp)
-            self.transport.close()
-        else:
-            resp = await route['func'](self)
+        # adapter = self.app.create_url_adapter()
+        try:
+            match = self.app.adapter.match(self.url_requested.path.decode('utf-8'))
+
+            # print(match)
+            func = self.app.view_functions.get(match[0])
+            # print(func)
+            resp = await func(self, **match[1])
+            # if not route:
+            #     self.status_code = 404
+            #     self.create_response_header()
+            #     resp = await self.app.get_error_response(404, self)
+            #     self.transport.write(self.header + resp)
+            #     self.transport.close()
+            # else:
             self.status_code = 200
             self.create_response_header()
             self.transport.write(self.header + resp)
             self.transport.close()
-        print('[{datetime}] : {status_code} {method} {url}'.format(datetime=datetime.datetime.now(),
-                                                                   status_code=self.status_code,
-                                                                   method=self.method.decode('utf-8'),
-                                                                   url=self.url_requested.path.decode('utf-8')))
+
+
+            # print('[{datetime}] : {status_code} {method} {url}'.format(datetime=datetime.datetime.now(),
+            #                                                            status_code=self.status_code,
+            #                                                            method=self.method.decode('utf-8'),
+            #                                                            url=self.url_requested.path.decode('utf-8')))
+        except NotFound:
+            pass
+        except MethodNotAllowed:
+            pass
+        except RequestRedirect as e:
+            print(e)
+        finally:
+            await self.call_after_requests()
+    
+    async def call_after_requests(self):
+        pass  
 
     def create_response_header(self):
         self.header = "HTTP/%s %d %s\r\n" % (self.http_version, self.status_code, HTTP_STATUS_CODES[self.status_code])
@@ -75,14 +102,14 @@ class FluteHttpProtocol(asyncio.Protocol):
     def on_header(self, name, value):
         self.headers[name] = value
 
-    def on_headers_complete(self):
-        pass
+    # def on_headers_complete(self):
+    #     pass
 
     def on_body(self, body):
-        req_body = body
+        self.req_body = body
 
-    def on_message_complete(self):
-        pass
+    # def on_message_complete(self):
+    #     pass
 
     def on_url(self, url):
         self.url_requested = parse_url(url)
